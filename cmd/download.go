@@ -15,16 +15,30 @@ import (
 
 // downloadCmd represents the download command
 var (
-	downloadUrl  string
-	format       string
-	outputFolder string
-	dryRun       bool
-	downloadCmd  = &cobra.Command{
+	downloadUrl    string
+	format         string
+	outputFolder   string
+	dryRun         bool
+	addSourceURL   bool
+	downloadImages bool
+	imageQuality   string
+	imagesDir      string
+	downloadFiles  bool
+	fileExtensions string
+	filesDir       string
+	createArchive  bool
+	downloadCmd    = &cobra.Command{
 		Use:   "download",
 		Short: "Download individual posts or the entire public archive",
 		Long:  `You can provide the url of a single post or the main url of the Substack you want to download.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			startTime := time.Now()
+			
+			// Create archive instance if flag is set
+			var archive *lib.Archive
+			if createArchive {
+				archive = lib.NewArchive()
+			}
 
 			// if url contains "/p/", we are downloading a single post
 			if strings.Contains(downloadUrl, "/p/") {
@@ -53,7 +67,30 @@ var (
 					fmt.Printf("Writing post to file %s\n", path)
 				}
 
-				post.WriteToFile(path, format)
+				if downloadImages || downloadFiles {
+					imageQualityEnum := lib.ImageQuality(imageQuality)
+					// Parse file extensions if specified
+					var fileExtensionsSlice []string
+					if fileExtensions != "" {
+						fileExtensionsSlice = strings.Split(strings.ReplaceAll(fileExtensions, " ", ""), ",")
+					}
+					imageResult, err := post.WriteToFileWithImages(ctx, path, format, addSourceURL, downloadImages, imageQualityEnum, imagesDir, downloadFiles, fileExtensionsSlice, filesDir, fetcher)
+					if err != nil {
+						log.Printf("Error writing file %s: %v\n", path, err)
+					} else if verbose && imageResult.Success > 0 {
+						fmt.Printf("Downloaded %d images (%d failed) for post %s\n", imageResult.Success, imageResult.Failed, post.Slug)
+					}
+				} else {
+					err = post.WriteToFile(path, format, addSourceURL)
+					if err != nil {
+						log.Printf("Error writing file %s: %v\n", path, err)
+					}
+				}
+
+				// Add to archive if enabled
+				if archive != nil {
+					archive.AddEntry(post, path, startTime)
+				}
 
 				if verbose {
 					fmt.Println("Done in ", time.Since(startTime))
@@ -122,11 +159,59 @@ var (
 						fmt.Printf("Writing post to file %s\n", path)
 					}
 
-					post.WriteToFile(path, format)
+					if downloadImages || downloadFiles {
+						imageQualityEnum := lib.ImageQuality(imageQuality)
+						// Parse file extensions if specified
+						var fileExtensionsSlice []string
+						if fileExtensions != "" {
+							fileExtensionsSlice = strings.Split(strings.ReplaceAll(fileExtensions, " ", ""), ",")
+						}
+						imageResult, err := post.WriteToFileWithImages(ctx, path, format, addSourceURL, downloadImages, imageQualityEnum, imagesDir, downloadFiles, fileExtensionsSlice, filesDir, fetcher)
+						if err != nil {
+							log.Printf("Error writing file %s: %v\n", path, err)
+						} else if verbose && imageResult.Success > 0 {
+							fmt.Printf("Downloaded %d images (%d failed) for post %s\n", imageResult.Success, imageResult.Failed, post.Slug)
+						}
+					} else {
+						err = post.WriteToFile(path, format, addSourceURL)
+						if err != nil {
+							log.Printf("Error writing file %s: %v\n", path, err)
+						}
+					}
+
+					// Add to archive if enabled and post was successfully written
+					if archive != nil {
+						archive.AddEntry(post, path, time.Now())
+					}
 				}
 				if verbose {
 					fmt.Println("Downloaded", downloadedPostsCount, "posts, out of", len(urls))
 					fmt.Println("Done in ", time.Since(startTime))
+				}
+			}
+
+			// Generate archive page if enabled
+			if archive != nil && len(archive.Entries) > 0 {
+				if verbose {
+					fmt.Printf("Generating archive page in %s format...\n", format)
+				}
+				
+				var archiveErr error
+				switch format {
+				case "html":
+					archiveErr = archive.GenerateHTML(outputFolder)
+				case "md":
+					archiveErr = archive.GenerateMarkdown(outputFolder)
+				case "txt":
+					archiveErr = archive.GenerateText(outputFolder)
+				default:
+					archiveErr = fmt.Errorf("unknown format for archive: %s", format)
+				}
+				
+				if archiveErr != nil {
+					log.Printf("Error generating archive page: %v\n", archiveErr)
+				} else if verbose {
+					fmt.Printf("Archive page generated: %s/index.%s\n", outputFolder, format)
 				}
 			}
 		},
@@ -138,6 +223,14 @@ func init() {
 	downloadCmd.Flags().StringVarP(&format, "format", "f", "html", "Specify the output format (options: \"html\", \"md\", \"txt\"")
 	downloadCmd.Flags().StringVarP(&outputFolder, "output", "o", ".", "Specify the download directory")
 	downloadCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Enable dry run")
+	downloadCmd.Flags().BoolVar(&addSourceURL, "add-source-url", false, "Add the original post URL at the end of the downloaded file")
+	downloadCmd.Flags().BoolVar(&downloadImages, "download-images", false, "Download images locally and update content to reference local files")
+	downloadCmd.Flags().StringVar(&imageQuality, "image-quality", "high", "Image quality to download (options: \"high\", \"medium\", \"low\")")
+	downloadCmd.Flags().StringVar(&imagesDir, "images-dir", "images", "Directory name for downloaded images")
+	downloadCmd.Flags().BoolVar(&downloadFiles, "download-files", false, "Download file attachments locally and update content to reference local files")
+	downloadCmd.Flags().StringVar(&fileExtensions, "file-extensions", "", "Comma-separated list of file extensions to download (e.g., 'pdf,docx,txt'). If empty, downloads all file types")
+	downloadCmd.Flags().StringVar(&filesDir, "files-dir", "files", "Directory name for downloaded file attachments")
+	downloadCmd.Flags().BoolVar(&createArchive, "create-archive", false, "Create an archive index page linking all downloaded posts")
 	downloadCmd.MarkFlagRequired("url")
 }
 
